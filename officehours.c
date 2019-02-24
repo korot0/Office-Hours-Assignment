@@ -15,6 +15,8 @@
 
 #define CLASSA 0
 #define CLASSB 1
+#define CLASSC 2
+#define CLASSD 3
 
 /* TODO */
 /* Add your synchronization variables here */
@@ -37,6 +39,7 @@ typedef struct
   int arrival_time;  // time between the arrival of this student and the previous student
   int question_time; // time the student needs to spend with the professor
   int student_id;
+  int class;
 } student_info;
 
 /* Called at beginning of simulation.  
@@ -65,7 +68,8 @@ static int initialize(student_info *si, char *filename)
   }
 
   int i = 0;
-  while ( (fscanf(fp, "%d%d\n", &(si[i].arrival_time), &(si[i].question_time))!=EOF) && i < MAX_STUDENTS ) 
+  while ( (fscanf(fp, "%d%d%d\n", &(si[i].class), &(si[i].arrival_time), &(si[i].question_time))!=EOF) && 
+           i < MAX_STUDENTS ) 
   {
     i++;
   }
@@ -304,7 +308,7 @@ int main(int nargs, char **args)
                 
     student_type = random() % 2;
 
-    if (student_type == CLASSA)
+    if (s_info[i].class == CLASSA)
     {
       result = pthread_create(&student_tid[i], NULL, classa_student, (void *)&s_info[i]);
     }
