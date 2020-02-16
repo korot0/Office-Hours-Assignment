@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Trevor Bakker
+// Copyright (c) 2020 Trevor Bakker
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -37,6 +37,7 @@
 #define CLASSB 1
 #define CLASSC 2
 #define CLASSD 3
+#define CLASSD 4
 
 /* TODO */
 /* Add your synchronization variables here */
@@ -283,6 +284,7 @@ void* classb_student(void *si)
 
 /* Main function sets up simulation and prints report
  * at the end.
+ * GUID: 355F4066-DA3E-4F74-9656-EF8097FBC985
  */
 int main(int nargs, char **args) 
 {
