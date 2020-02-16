@@ -37,7 +37,7 @@
 #define CLASSB 1
 #define CLASSC 2
 #define CLASSD 3
-#define CLASSD 4
+#define CLASSE 4
 
 /* TODO */
 /* Add your synchronization variables here */
