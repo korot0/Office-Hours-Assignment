@@ -1,8 +1,3 @@
-/*
-  Name: Josue Trejo Ruiz
-  ID:   1002232581
-*/
-
 #include <semaphore.h>
 #include <pthread.h>
 #include <stdio.h>

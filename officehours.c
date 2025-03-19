@@ -1,6 +1,8 @@
 /*
+
   Name: Josue Trejo Ruiz
   ID:   1002232581
+
 */
 
 // Copyright (c) 2020 Trevor Bakker
@@ -61,6 +63,7 @@ static int students_in_office; /* Total number of students currently in the offi
 static int classa_inoffice;    /* Total numbers of students from class A currently in the office */
 static int classb_inoffice;    /* Total numbers of students from class B in the office */
 static int students_since_break = 0;
+
 static int current_class = -1;
 static int consecutive = 0;
 static int waitingA = 0;
@@ -140,18 +143,17 @@ void *professorthread(void *junk)
     {
       pthread_cond_wait(&cond, &mutex);
     }
-    // Set the flag so no new student enters
+    // Set the mutex so no new student enters
     professor_on_break = 1;
     pthread_mutex_unlock(&mutex);
 
     // Take break outside the critical region
     take_break();
 
+    // REset variables
     pthread_mutex_lock(&mutex);
-    // After break, reset counters.
     students_since_break = 0;
     professor_on_break = 0;
-    // Wake up waiting students.
     pthread_cond_broadcast(&cond);
     pthread_mutex_unlock(&mutex);
   }
