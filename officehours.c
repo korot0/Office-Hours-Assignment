@@ -31,7 +31,6 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <assert.h>
-#include <stdbool.h>
 
 /*** Constants that define parameters of the simulation ***/
 
@@ -47,15 +46,6 @@
 
 /* TODO */
 /* Add your synchronization variables here */
-pthread_mutex_t sync_mutex;
-pthread_cond_t sync_profCond;
-pthread_cond_t sync_studentCond;
-static int sync_profPresent = 0;  /* 0: professor not in office, 1: professor present */
-static int sync_consecutiveA = 0; /* Count of consecutive Class A students admitted */
-static int sync_consecutiveB = 0; /* Count of consecutive Class B students admitted */
-static int sync_waitA = 0;        /* Number of Class A students waiting outside */
-static int sync_waitB = 0;        /* Number of Class B students waiting outside */
-#define SYNC_MAX_CONSECUTIVE 5    /* Maximum consecutive students from one class allowed */
 
 /* Basic information about simulation.  They are printed/checked at the end
  * and in assert statements during execution.
@@ -64,10 +54,18 @@ static int sync_waitB = 0;        /* Number of Class B students waiting outside 
  * code that you develop.
  */
 
-static int students_in_office; /* Total numbers of students currently in the office */
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+
+static int students_in_office; /* Total number of students currently in the office */
 static int classa_inoffice;    /* Total numbers of students from class A currently in the office */
 static int classb_inoffice;    /* Total numbers of students from class B in the office */
 static int students_since_break = 0;
+static int current_class = -1;
+static int consecutive = 0;
+static int waitingA = 0;
+static int waitingB = 0;
+static int professor_on_break = 0;
 
 typedef struct
 {
@@ -91,36 +89,31 @@ static int initialize(student_info *si, char *filename)
   /* Initialize your synchronization variables (and
    * other variables you might use) here
    */
-  pthread_mutex_init(&sync_mutex, NULL);
-  pthread_cond_init(&sync_profCond, NULL);
-  pthread_cond_init(&sync_studentCond, NULL);
-  sync_profPresent = 0;
-  sync_consecutiveA = 0;
-  sync_consecutiveB = 0;
-  sync_waitA = 0;
-  sync_waitB = 0;
+
+  current_class = -1;
+  consecutive = 0;
+  waitingA = 0;
+  waitingB = 0;
+  professor_on_break = 0;
 
   /* Read in the data file and initialize the student array */
   FILE *fp;
-
   if ((fp = fopen(filename, "r")) == NULL)
   {
     printf("Cannot open input file %s for reading.\n", filename);
     exit(1);
   }
-
   int i = 0;
   while ((fscanf(fp, "%d%d%d\n", &(si[i].class), &(si[i].arrival_time), &(si[i].question_time)) != EOF) &&
          i < MAX_STUDENTS)
   {
     i++;
   }
-
   fclose(fp);
   return i;
 }
 
-/* Code executed by professor to simulate taking a break
+/* Code executed by professor to simulate taking a break.
  * You do not need to add anything here.
  */
 static void take_break()
@@ -141,31 +134,26 @@ void *professorthread(void *junk)
   /* Loop while waiting for students to arrive. */
   while (1)
   {
-
-    /* TODO */
-    /* Add code here to handle the student's request.             */
-    /* Currently the body of the loop is empty. There's           */
-    /* no communication between professor and students, i.e. all  */
-    /* students are admitted without regard of the number         */
-    /* of available seats, which class a student is in,           */
-    /* and whether the professor needs a break. You need to add   */
-    /* all of this.                                               */
-
-    pthread_mutex_lock(&sync_mutex);
-
-    /* If the professor isn’t yet marked as present, mark him as in the office and notify waiting threads */
-    if (sync_profPresent == 0)
+    pthread_mutex_lock(&mutex);
+    // Wait until the professor helps 10 students and the office is empty.
+    while (!(students_since_break >= professor_LIMIT && students_in_office == 0))
     {
-      sync_profPresent = 1;
-      pthread_cond_broadcast(&sync_profCond);
+      pthread_cond_wait(&cond, &mutex);
     }
-    /* If the professor has helped professor_LIMIT students or is not present, and the office is empty, take a break */
-    if ((students_since_break == professor_LIMIT || sync_profPresent == 0) && (students_in_office == 0))
-    {
-      take_break();
-      pthread_cond_broadcast(&sync_profCond);
-    }
-    pthread_mutex_unlock(&sync_mutex);
+    // Set the flag so no new student enters
+    professor_on_break = 1;
+    pthread_mutex_unlock(&mutex);
+
+    // Take break outside the critical region
+    take_break();
+
+    pthread_mutex_lock(&mutex);
+    // After break, reset counters.
+    students_since_break = 0;
+    professor_on_break = 0;
+    // Wake up waiting students.
+    pthread_cond_broadcast(&cond);
+    pthread_mutex_unlock(&mutex);
   }
   pthread_exit(NULL);
 }
@@ -176,40 +164,31 @@ void *professorthread(void *junk)
  */
 void classa_enter()
 {
+  pthread_mutex_lock(&mutex);
+  waitingA++;
 
-  /* TODO */
-  /* Request permission to enter the office.  You might also want to add  */
-  /* synchronization for the simulations variables below                  */
-  /*  YOUR CODE HERE.                                                     */
-  pthread_mutex_lock(&sync_mutex);
-  sync_waitA++; /* Increment waiting count for Class A */
-
-  /* Wait until the professor is available (not on break) */
-  while (students_since_break >= professor_LIMIT || sync_profPresent == 0)
+  while (professor_on_break ||
+         (students_in_office == MAX_SEATS) ||
+         (current_class != -1 && current_class != CLASSA) ||
+         (students_since_break >= professor_LIMIT) ||
+         (current_class == CLASSA && consecutive >= 5 && waitingB > 0))
   {
-    pthread_cond_wait(&sync_profCond, &sync_mutex);
+    pthread_cond_wait(&cond, &mutex);
   }
+  waitingA--;
 
-  /* Wait until office conditions allow a Class A student:
-   - Either fewer than SYNC_MAX_CONSECUTIVE Class A students have been admitted or no Class B is waiting.
-   - No Class B student is currently in the office.
-   - There is a free seat. */
-  while ((sync_consecutiveA >= SYNC_MAX_CONSECUTIVE && sync_waitB > 0) ||
-         (classb_inoffice > 0) ||
-         (students_in_office >= MAX_SEATS))
+  // If office is empty, set current class to CLASSA
+  if (students_in_office == 0)
   {
-    pthread_cond_wait(&sync_studentCond, &sync_mutex);
+    current_class = CLASSA;
+    consecutive = 0;
   }
+  students_in_office++;
+  students_since_break++;
+  consecutive++;
+  classa_inoffice++;
 
-  /* Admit the student into the office */
-  students_in_office += 1;
-  students_since_break += 1;
-  classa_inoffice += 1;
-  sync_consecutiveB = 0; /* Reset consecutive count for Class B */
-  sync_consecutiveA++;   /* Increment consecutive count for Class A */
-  sync_waitA--;          /* One fewer Class A student waiting */
-
-  pthread_mutex_unlock(&sync_mutex);
+  pthread_mutex_unlock(&mutex);
 }
 
 /* Code executed by a class B student to enter the office.
@@ -218,42 +197,33 @@ void classa_enter()
  */
 void classb_enter()
 {
+  pthread_mutex_lock(&mutex);
+  waitingB++;
 
-  /* TODO */
-  /* Request permission to enter the office.  You might also want to add  */
-  /* synchronization for the simulations variables below                  */
-  /*  YOUR CODE HERE.                                                     */
-  pthread_mutex_lock(&sync_mutex);
-  sync_waitB++; /* Increment waiting count for Class B */
-
-  while (students_since_break >= professor_LIMIT || sync_profPresent == 0)
+  while (professor_on_break ||
+         (students_in_office == MAX_SEATS) ||
+         (current_class != -1 && current_class != CLASSB) ||
+         (students_since_break >= professor_LIMIT) ||
+         (current_class == CLASSB && consecutive >= 5 && waitingA > 0))
   {
-    pthread_cond_wait(&sync_profCond, &sync_mutex);
+    pthread_cond_wait(&cond, &mutex);
   }
+  waitingB--;
 
-  /* Wait until office conditions allow a Class B student:
-   - Either fewer than SYNC_MAX_CONSECUTIVE Class B students have been admitted or no Class A is waiting.
-   - No Class A student is currently in the office.
-   - There is a free seat. */
-  while ((sync_consecutiveB >= SYNC_MAX_CONSECUTIVE && sync_waitA > 0) ||
-         (classa_inoffice > 0) ||
-         (students_in_office >= MAX_SEATS))
+  if (students_in_office == 0)
   {
-    pthread_cond_wait(&sync_studentCond, &sync_mutex);
+    current_class = CLASSB;
+    consecutive = 0;
   }
+  students_in_office++;
+  students_since_break++;
+  consecutive++;
+  classb_inoffice++;
 
-  /* Admit the student into the office */
-  students_in_office += 1;
-  students_since_break += 1;
-  classb_inoffice += 1;
-  sync_consecutiveA = 0; /* Reset consecutive count for Class A */
-  sync_consecutiveB++;   /* Increment consecutive count for Class B */
-  sync_waitB--;          /* One fewer Class B student waiting */
-
-  pthread_mutex_unlock(&sync_mutex);
+  pthread_mutex_unlock(&mutex);
 }
 
-/* Code executed by a student to simulate the time he spends in the office asking questions
+/* Code executed by a student to simulate the time he spends in the office asking questions.
  * You do not need to add anything here.
  */
 static void ask_questions(int t)
@@ -267,20 +237,24 @@ static void ask_questions(int t)
  */
 static void classa_leave()
 {
-  /*
-   *  TODO
-   *  YOUR CODE HERE.
-   */
+  pthread_mutex_lock(&mutex);
+  students_in_office--;
+  classa_inoffice--;
 
-  pthread_mutex_lock(&sync_mutex);
-
-  students_in_office -= 1;
-  classa_inoffice -= 1;
-
-  /* Notify waiting students that a seat may be available */
-  pthread_cond_broadcast(&sync_studentCond);
-
-  pthread_mutex_unlock(&sync_mutex);
+  if (students_in_office == 0)
+  {
+    // Reset the office to empty.
+    current_class = -1;
+    consecutive = 0;
+    // If exactly professor_LIMIT students were helped, signal the professor.
+    if (students_since_break >= professor_LIMIT)
+    {
+      pthread_cond_signal(&cond);
+    }
+  }
+  // Wake up waiting threads.
+  pthread_cond_broadcast(&cond);
+  pthread_mutex_unlock(&mutex);
 }
 
 /* Code executed by a class B student when leaving the office.
@@ -289,15 +263,21 @@ static void classa_leave()
  */
 static void classb_leave()
 {
-  pthread_mutex_lock(&sync_mutex);
+  pthread_mutex_lock(&mutex);
+  students_in_office--;
+  classb_inoffice--;
 
-  students_in_office -= 1;
-  classb_inoffice -= 1;
-
-  /* Notify waiting students that a seat may be available */
-  pthread_cond_broadcast(&sync_studentCond);
-
-  pthread_mutex_unlock(&sync_mutex);
+  if (students_in_office == 0)
+  {
+    current_class = -1;
+    consecutive = 0;
+    if (students_since_break >= professor_LIMIT)
+    {
+      pthread_cond_signal(&cond);
+    }
+  }
+  pthread_cond_broadcast(&cond);
+  pthread_mutex_unlock(&mutex);
 }
 
 /* Main code for class A student threads.
@@ -318,7 +298,7 @@ void *classa_student(void *si)
   assert(classb_inoffice >= 0 && classb_inoffice <= MAX_SEATS);
   assert(classb_inoffice == 0);
 
-  /* ask questions  --- do not make changes to the 3 lines below*/
+  /* ask questions --- do not make changes to these three lines */
   printf("Student %d from class A starts asking questions for %d minutes\n", s_info->student_id, s_info->question_time);
   ask_questions(s_info->question_time);
   printf("Student %d from class A finishes asking questions and prepares to leave\n", s_info->student_id);
@@ -377,7 +357,6 @@ int main(int nargs, char **args)
 {
   int i;
   int result;
-  int student_type;
   int num_students;
   void *status;
   pthread_t professor_tid;
@@ -393,16 +372,13 @@ int main(int nargs, char **args)
   num_students = initialize(s_info, args[1]);
   if (num_students > MAX_STUDENTS || num_students <= 0)
   {
-    printf("Error:  Bad number of student threads. "
-           "Maybe there was a problem with your input file?\n");
+    printf("Error:  Bad number of student threads. Maybe there was a problem with your input file?\n");
     return 1;
   }
 
-  printf("Starting officehour simulation with %d students ...\n",
-         num_students);
+  printf("Starting officehour simulation with %d students ...\n", num_students);
 
   result = pthread_create(&professor_tid, NULL, professorthread, NULL);
-
   if (result)
   {
     printf("officehour:  pthread_create failed for professor: %s\n", strerror(result));
@@ -411,11 +387,8 @@ int main(int nargs, char **args)
 
   for (i = 0; i < num_students; i++)
   {
-
     s_info[i].student_id = i;
     sleep(s_info[i].arrival_time);
-
-    student_type = random() % 2;
 
     if (s_info[i].class == CLASSA)
     {
@@ -428,13 +401,12 @@ int main(int nargs, char **args)
 
     if (result)
     {
-      printf("officehour: thread_fork failed for student %d: %s\n",
-             i, strerror(result));
+      printf("officehour: thread_fork failed for student %d: %s\n", i, strerror(result));
       exit(1);
     }
   }
 
-  /* wait for all student threads to finish */
+  /* Wait for all student threads to finish */
   for (i = 0; i < num_students; i++)
   {
     pthread_join(student_tid[i], &status);
@@ -444,6 +416,5 @@ int main(int nargs, char **args)
   pthread_cancel(professor_tid);
 
   printf("Office hour simulation done.\n");
-
   return 0;
 }
